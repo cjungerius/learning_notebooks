@@ -1,0 +1,119 @@
+---
+title: "Bootstrap model comparison for Mixed Models using Julia"
+author: "Chris Jungerius"
+date: "8/15/2022"
+jupyter: julia-1.7
+---
+
+```{julia}
+using DataFrames
+using CSV
+using Gadfly          
+using MixedModels
+using StatsModels
+using Statistics
+```
+
+We use mixed models to explain data in terms of both fixed and random effects. One example of a dataset where such a model seems appropriate is in the R package `pbkrtest`'s 'beets' dataset:
+
+```{julia}
+beets = CSV.read("beets.csv",DataFrame)
+sug = fit(MixedModel, @formula(sugpct ~ 1 + block + sow + harvest + (1|block&harvest)), beets)
+```
+
+To see if we should be including e.g. `harvest` as a fixed factor, we can compare this fitted model to the intercept model using a Likelihood Ratio Test (LRT):
+
+```{julia}
+sug_h = fit(MixedModel, @formula(sugpct ~ 1 + block + sow + (1|block&harvest)), beets)
+```
+```{julia}
+lrt = StatsModels.lrtest(sug,sug_h)
+```
+
+Comparison of the two models suggests that the factor `harvest` should be included in the model. However, [because the LR test statistic is not necessarily $\chi^2$ distributed in mixed models](https://www.ssc.wisc.edu/sscc/pubs/MM/MM_TestEffects.html), We can check the validity of the LRT by parametric bootstrap: simulate the LRT of the full model and the restricted model under data generated from the restricted model, to see how extreme the found value is compared to the values we would find under the $H_0$ distribution. In R we would do this using the [`pbkrtest` package](https://www.jstatsoft.org/article/view/v059i09) - however, because of its speed, Julia is arguably better-suited to such bootstrapping approaches than R.
+
+One run of such a simulation would go as follows:
+
+```{julia}
+#| output: false
+function simmodcomp(full, res)
+        y = simulate(res)
+        refit!(full,y)
+        refit!(res,y)
+        deviance(res) - deviance(full)
+end
+
+m = deepcopy(sug)
+n = deepcopy(sug_h)
+s = simmodcomp(m,n)
+```
+```{julia}
+#| echo: false
+println("The likelihood ratio for this simulation is ", s)
+```
+And many of such simulations would go like this:
+```{julia}
+#| output: false
+#| warning: false
+ 
+function bootmodcomp(full, res; nsim = 10_000)
+        f = deepcopy(full)
+        r = deepcopy(res)
+        ref = deviance(res) - deviance(full)
+        refdist = []
+        for i in 1:nsim
+                y = simulate(res)
+                refit!(f,y)
+                refit!(r,y)
+                sim = deviance(r) - deviance(f)
+                sim > 0 ? push!(refdist,sim) : continue
+        end
+        sort!(refdist)
+end
+reference_distribution = bootmodcomp(sug, sug_h)
+```
+```{julia}
+#| echo: false
+println("The minimum of the reference distribution is ", minimum(reference_distribution))
+println("The maximum of the reference distribution is ", maximum(reference_distribution))
+println("The mean of the reference distribution is ", mean(reference_distribution))
+println("The median of the reference distribution is ", median(reference_distribution))
+
+```
+
+(Note that this model does not always converge - this also happens in the [original paper](https://www.jstatsoft.org/article/view/v059i09) using this example. As in the example, however, it only happens very rarely, and for our purposes we will ignore it here)
+
+So what is the value of our test statistic compared to this new reference distribution?
+
+```{julia}
+#| output: false
+ref = deviance(sug_h) - deviance(sug)
+p = 1 - searchsortedfirst(reference_distribution, ref)/length(reference_distribution)
+```
+```{julia}
+#| echo: false
+println("The p value found through our bootstrap is ", round(p, digits = 3))
+```
+
+```{julia}
+#| echo: false
+#| figure-cap: "*found likelihood ratio vs reference distribution*"
+
+set_default_plot_size(15cm, 15cm)
+plot(
+        x = reference_distribution,
+        Geom.density,
+        xintercept = [ref],
+        Geom.vline(color="black",style=:dash),
+        Guide.xlabel("LR test statistic value",orientation=:horizontal),
+        Guide.ylabel("probability",orientation=:vertical),
+
+)
+
+```
+
+If we compare this value to the value found in the `pbkrtest` paper, we can see that it aligns quite closely (allowing for variation due to the randomness of bootstrapping)!
+
+
+
+
